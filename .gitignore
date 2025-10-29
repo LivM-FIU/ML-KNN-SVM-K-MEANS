@@ -4,3 +4,6 @@ data/
 results/figures/
 *.ipynb_checkpoints
 .env
+*results/
+*reports/
+venv/

@@ -1,18 +1,11 @@
-
 """
-CAP5610 HW4: KNN, SVM (Linear/Poly/RBF), and KMeans on lncRNA_5_Cancers.csv
-Author: <Your Name>
-Usage:
-    python HW4.py --csv data/lncRNA_5_Cancers.csv --out results/
-Notes:
-    - Uses 5-fold Stratified CV.
-    - Reports macro-averaged Accuracy, Precision, Recall, F1, ROC-AUC, and PR-AUC.
-    - Saves aggregated confusion matrices and multi-class ROC/PR curves.
-    - Runs KMeans for K=2..7 with PCA visualization, Elbow, and Silhouette plots.
+CAP5610 HW4 (DROP version, no CLI): KNN, SVM (Linear/Poly/RBF), KMeans on lncRNA_5_Cancers.csv
+- 5-fold Stratified CV
+- Macro Accuracy/Precision/Recall/F1, ROC-AUC, PR-AUC
+- Confusion matrices and OvR ROC/PR figures
+- KMeans for K=2..7 with PCA visualization, Elbow, Silhouette
 """
-
 import os
-import argparse
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -24,7 +17,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler, label_binarize
 from sklearn.pipeline import Pipeline
 from sklearn.neighbors import KNeighborsClassifier
-from sklearn.svm import SVC
+from sklearn.svm import SVC, LinearSVC
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 
@@ -40,10 +33,14 @@ from sklearn.metrics import (
     silhouette_score,
 )
 
-
+# -----------------------------
+# Config (edit here if needed)
+# -----------------------------
 RANDOM_STATE = 42
 N_SPLITS = 5
-
+CSV_PATH = "data/lncRNA_5_Cancers.csv"  # put your CSV here
+OUT_DIR = "results"                      # output folder
+POLY_DEGREE = 2                          # default polynomial degree
 
 # -----------------------------
 # Utilities
@@ -55,20 +52,21 @@ def ensure_dirs(out_dir: str) -> Tuple[str, str]:
     os.makedirs(fig_dir, exist_ok=True)
     return out_dir, fig_dir
 
-
-def load_data(csv_path: str) -> Tuple[pd.DataFrame, pd.Series]:
+def load_data(auto_path: str = CSV_PATH) -> Tuple[pd.DataFrame, pd.Series]:
     """Load CSV and infer label column (label/cancer/cancer_type/class or last column)."""
-    df = pd.read_csv(csv_path)
+    if not os.path.exists(auto_path):
+        raise FileNotFoundError(
+            f"Dataset not found: {auto_path}\n"
+            f"Please place 'lncRNA_5_Cancers.csv' inside a 'data' folder next to this script, "
+            f"or update CSV_PATH at the top."
+        )
+    df = pd.read_csv(auto_path)
     label_col_candidates = [c for c in df.columns if c.lower() in ("label", "cancer", "cancer_type", "class")]
-    if label_col_candidates:
-        label_col = label_col_candidates[0]
-    else:
-        label_col = df.columns[-1]
+    label_col = label_col_candidates[0] if label_col_candidates else df.columns[-1]
     y = df[label_col].astype(str)
     X = df.drop(columns=[label_col]).apply(pd.to_numeric, errors="coerce").fillna(0.0)
+    print(f" Loaded dataset '{auto_path}' with shape {X.shape} and label column '{label_col}'.")
     return X, y
-
-
 @dataclass
 class CVResults:
     name: str
@@ -82,18 +80,16 @@ class CVResults:
     roc_auc_macro: List[float]
     pr_auc_macro: List[float]
 
-
 def compute_multiclass_auc(y_true: np.ndarray, y_score: np.ndarray, classes: List[str]) -> Tuple[float, float]:
     """
     Compute macro ROC-AUC and macro PR-AUC using one-vs-rest binarization.
-    y_true: shape (n_samples, ) string/int labels
+    y_true: shape (n_samples,)
     y_score: shape (n_samples, n_classes) decision_function or predict_proba scores
     """
     y_bin = label_binarize(y_true, classes=classes)
     roc_auc = roc_auc_score(y_bin, y_score, average="macro", multi_class="ovr")
     pr_auc = average_precision_score(y_bin, y_score, average="macro")
     return float(roc_auc), float(pr_auc)
-
 
 def run_cv_pipeline(name: str, estimator, X: pd.DataFrame, y: pd.Series, classes: List[str]) -> CVResults:
     skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
@@ -105,7 +101,7 @@ def run_cv_pipeline(name: str, estimator, X: pd.DataFrame, y: pd.Series, classes
         X_train, X_test = X.iloc[train_idx], X.iloc[test_idx]
         y_train, y_test = y.iloc[train_idx], y.iloc[test_idx]
 
-        # Standardize features for most models
+        # Always scale before SVM/KNN
         pipe = Pipeline([
             ("scaler", StandardScaler(with_mean=True, with_std=True)),
             ("clf", estimator)
@@ -113,30 +109,33 @@ def run_cv_pipeline(name: str, estimator, X: pd.DataFrame, y: pd.Series, classes
         pipe.fit(X_train, y_train)
         y_pred = pipe.predict(X_test)
 
-        # Collect labels
         y_true_all.extend(y_test.tolist())
         y_pred_all.extend(y_pred.tolist())
 
-        # Fold metrics (macro-averaged)
+        # Macro metrics
         accs.append(accuracy_score(y_test, y_pred))
         prec, rec, f1, _ = precision_recall_fscore_support(
             y_test, y_pred, average="macro", zero_division=0
         )
         precs.append(prec); recs.append(rec); f1s.append(f1)
 
-        # Scores for ROC/PR AUC
+        # Scores: prefer decision_function (fast; no probability calibration)
         clf = pipe.named_steps["clf"]
-        if hasattr(clf, "predict_proba"):
-            scores = pipe.predict_proba(X_test)
-        else:
+        if hasattr(clf, "decision_function"):
             scores = pipe.decision_function(X_test)
-            if scores.ndim == 1:  # binary fallback (not expected here, but safe)
+            if scores.ndim == 1:  # binary shape fix
                 scores = np.vstack([-scores, scores]).T
+        elif hasattr(clf, "predict_proba"):
+            scores = pipe.predict_proba(X_test)  # KNN path
+        else:
+            # Fallback (not ideal for ROC/PR): 1.0 for predicted class
+            scores = np.zeros((len(y_test), len(classes)), dtype=float)
+            class_to_idx = {c: i for i, c in enumerate(classes)}
+            for i, pred in enumerate(y_pred):
+                scores[i, class_to_idx[pred]] = 1.0
 
-        # Compute fold AUCs
         roc_auc, pr_auc = compute_multiclass_auc(y_test.values, scores, classes=classes)
         roc_aucs.append(roc_auc); pr_aucs.append(pr_auc)
-
         scores_list.append(scores)
 
         print(f"[{name}] Fold {fold}: acc={accs[-1]:.3f}, prec={prec:.3f}, rec={rec:.3f}, "
@@ -156,7 +155,6 @@ def run_cv_pipeline(name: str, estimator, X: pd.DataFrame, y: pd.Series, classes
         pr_auc_macro=pr_aucs
     )
 
-
 def summarize_cv(res: CVResults) -> pd.Series:
     return pd.Series({
         "Accuracy (mean)": np.mean(res.acc),
@@ -167,11 +165,66 @@ def summarize_cv(res: CVResults) -> pd.Series:
         "PR-AUC_macro (mean)": np.mean(res.pr_auc_macro),
     }, name=res.name)
 
+# NEW: helper to save one summary row per model
+def save_all_summaries(knn_res: CVResults, svm_results: Dict[str, CVResults], out_dir: str):
+    """
+    Build a single CSV with one row per model (KNN + each SVM).
+    """
+    all_results = {"KNN": knn_res}
+    all_results.update(svm_results)
+
+    rows = []
+    for name, res in all_results.items():
+        s = summarize_cv(res)
+        s.name = name  # ensure row name is the model name
+        rows.append(s.to_frame().T)
+
+    summary_df = pd.concat(rows, axis=0)
+    summary_df.index.name = "Model"
+    summary_df.to_csv(os.path.join(out_dir, "hw4_knn_svm_summary.csv"))
+    print(" Saved model summary:", os.path.join(out_dir, "hw4_knn_svm_summary.csv"))
+
+def plot_class_counts_from_y(y: pd.Series, out_dir: str, fig_dir: str, title: str = "Class Counts", file_stem: str = "class_counts"):
+    """
+    ONE bar per class. Counts how many rows belong to each class in `y`.
+    Saves:
+      - {out_dir}/{file_stem}.csv  (table of counts)
+      - {fig_dir}/{file_stem}.png  (bar chart)
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+
+    y_str = y.astype(str)
+
+    # Keep stable order of first appearance in the data
+    class_order = y_str.drop_duplicates().tolist()
+    counts = y_str.value_counts().reindex(class_order).fillna(0).astype(int)
+
+    # Save counts table
+    counts_path = os.path.join(out_dir, f"{file_stem}.csv")
+    counts.to_frame("count").to_csv(counts_path, index=True)
+
+    # Plot (pure matplotlib; one axes; no explicit colors)
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.bar(range(len(counts)), counts.values)
+    ax.set_title(title)
+    ax.set_xlabel("Class")
+    ax.set_ylabel("Count")
+    ax.set_xticks(range(len(counts)))
+    ax.set_xticklabels(counts.index.astype(str), rotation=45, ha="right")
+    fig.tight_layout()
+    png_path = os.path.join(fig_dir, f"{file_stem}.png")
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f" Saved counts table: {counts_path}")
+    print(f" Saved bar chart:   {png_path}")
+    return counts
 
 def plot_confusion(y_true: List[str], y_pred: List[str], classes: List[str], title: str, outpath: str):
     cm = confusion_matrix(y_true, y_pred, labels=classes)
     fig, ax = plt.subplots(figsize=(6, 5))
-    im = ax.imshow(cm, interpolation='nearest')
+    ax.imshow(cm, interpolation='nearest', cmap='Blues')
     ax.set_title(title)
     ax.set_xlabel("Predicted label")
     ax.set_ylabel("True label")
@@ -184,101 +237,102 @@ def plot_confusion(y_true: List[str], y_pred: List[str], classes: List[str], tit
     fig.savefig(outpath, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-
 def plot_multiclass_roc_pr(y_true: List[str], scores: np.ndarray, classes: List[str], base_name: str, fig_dir: str):
     """
-    Plot one-vs-rest ROC and PR curves (per-class) and micro/macro curves using aggregated CV scores.
+    Plot OvR ROC and PR curves (per-class) and a macro curve.
     Saves two figures: *_roc.png and *_pr.png
     """
     y_bin = label_binarize(np.array(y_true), classes=classes)
     n_classes = len(classes)
 
-    # ROC
-    fpr = dict(); tpr = dict(); roc_auc = dict()
+    # ---------- ROC ----------
+    fpr, tpr, roc_auc = {}, {}, {}
     for i in range(n_classes):
         fpr[i], tpr[i], _ = roc_curve(y_bin[:, i], scores[:, i])
         roc_auc[i] = auc(fpr[i], tpr[i])
-    # Micro-average
-    fpr["micro"], tpr["micro"], _ = roc_curve(y_bin.ravel(), scores.ravel())
-    roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
-    # Macro-average
+
+    # Macro ROC (area via macro mean of TPR over a common FPR grid)
     all_fpr = np.unique(np.concatenate([fpr[i] for i in range(n_classes)]))
     mean_tpr = np.zeros_like(all_fpr)
     for i in range(n_classes):
         mean_tpr += np.interp(all_fpr, fpr[i], tpr[i])
     mean_tpr /= n_classes
-    roc_auc["macro"] = auc(all_fpr, mean_tpr)
+    roc_auc_macro = auc(all_fpr, mean_tpr)
 
     fig, ax = plt.subplots(figsize=(6, 5))
     for i in range(n_classes):
         ax.plot(fpr[i], tpr[i], label=f"{classes[i]} (AUC={roc_auc[i]:.2f})")
-    ax.plot(fpr["micro"], tpr["micro"], linestyle="--", label=f"micro (AUC={roc_auc['micro']:.2f})")
-    ax.plot(all_fpr, mean_tpr, linestyle="-.", label=f"macro (AUC={roc_auc['macro']:.2f})")
+
+    ax.plot(all_fpr, mean_tpr, linestyle="-.", label=f"macro (AUC={roc_auc_macro:.2f})")
     ax.plot([0, 1], [0, 1], linestyle=":")
     ax.set_title(f"{base_name} – ROC (OvR)")
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
+    ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{base_name}_roc.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # PR
-    pr = dict(); rc = dict(); pr_auc = dict()
+    # ---------- PR ----------
+    pr, rc, pr_ap = {}, {}, {}
     for i in range(n_classes):
         pr[i], rc[i], _ = precision_recall_curve(y_bin[:, i], scores[:, i])
-        # average_precision_score equals area under PR curve (AP)
-        pr_auc[i] = average_precision_score(y_bin[:, i], scores[:, i])
-    # Micro-average
-    pr["micro"], rc["micro"], _ = precision_recall_curve(y_bin.ravel(), scores.ravel())
-    pr_auc["micro"] = average_precision_score(y_bin.ravel(), scores.ravel())
-    # Macro-average
-    # Interpolate recall grid
+        pr_ap[i] = average_precision_score(y_bin[:, i], scores[:, i])  # AP per class
+
+    # Authoritative macro-AP (no plotting needed for this number)
+    macro_ap_score = average_precision_score(y_bin, scores, average="macro")
+
     recall_grid = np.linspace(0, 1, 1000)
     mean_precision = np.zeros_like(recall_grid)
     for i in range(n_classes):
         mean_precision += np.interp(recall_grid, rc[i][::-1], pr[i][::-1])
     mean_precision /= n_classes
-    # Approximate macro-AP via trapezoid
-    macro_ap = np.trapz(mean_precision, recall_grid)
+    # Area under the macro curve 
+    macro_ap_curve = np.trapezoid(mean_precision, recall_grid)
 
     fig, ax = plt.subplots(figsize=(6, 5))
     for i in range(n_classes):
-        ax.plot(rc[i], pr[i], label=f"{classes[i]} (AP={pr_auc[i]:.2f})")
-    ax.plot(rc["micro"], pr["micro"], linestyle="--", label=f"micro (AP={pr_auc['micro']:.2f})")
-    ax.plot(recall_grid, mean_precision, linestyle="-.", label=f"macro (AP={macro_ap:.2f})")
+        ax.plot(rc[i], pr[i], label=f"{classes[i]} (AP={pr_ap[i]:.2f})")
+    ax.plot(recall_grid, mean_precision, linestyle="-.", label=f"macro (AP≈{macro_ap_curve:.2f}; score={macro_ap_score:.2f})")
     ax.set_title(f"{base_name} – PR (OvR)")
-    ax.set_xlabel("Recall")
-    ax.set_ylabel("Precision")
+    ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{base_name}_pr.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-
+# -----------------------------
+# Tasks
+# -----------------------------
 def task1_knn(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str, fig_dir: str) -> CVResults:
     print("\n=== Task 1: KNN (5-fold Stratified CV) ===")
     model = KNeighborsClassifier(n_neighbors=5)
     res = run_cv_pipeline("KNN", model, X, y, classes)
-    # Summary CSV (append or create)
-    summary = summarize_cv(res).to_frame().T
-    summary.to_csv(os.path.join(out_dir, "task1_knn_summary.csv"), index=True)
-    # Confusion
+    summarize_cv(res).to_frame().T.to_csv(os.path.join(out_dir, "task1_knn_summary.csv"), index=True)
     plot_confusion(res.y_true_all, res.y_pred_all, classes,
                    "KNN – Confusion Matrix (5-fold aggregated)",
                    os.path.join(fig_dir, "task1_knn_confusion.png"))
-    # ROC/PR curves (OvR)
     plot_multiclass_roc_pr(res.y_true_all, res.scores_all, classes, "task1_knn", fig_dir)
     return res
 
-
-def task2_svm(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str, fig_dir: str) -> Dict[str, CVResults]:
-    print("\n=== Task 2: SVM Kernels (5-fold Stratified CV) ===")
+def task2_svm_drop(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str, fig_dir: str,
+                   poly_degree: int = POLY_DEGREE) -> Dict[str, CVResults]:
+    """
+    Faster SVMs:
+      - Linear: LinearSVC (true linear solver)
+      - Poly: SVC(poly) with degree=poly_degree, probability=False
+      - RBF:  SVC(rbf) with probability=False
+    """
+    print("\n=== Task 2: SVM Kernels (DROP/faster) – 5-fold Stratified CV ===")
     kernels = {
-        "SVM_Linear": SVC(kernel="linear", probability=True, random_state=RANDOM_STATE),
-        "SVM_Poly":   SVC(kernel="poly", degree=3, probability=True, random_state=RANDOM_STATE),
-        "SVM_RBF":    SVC(kernel="rbf", probability=True, random_state=RANDOM_STATE),
+        "SVM_Linear": LinearSVC(random_state=RANDOM_STATE, dual="auto", max_iter=5000),
+        "SVM_Poly":   SVC(kernel="poly", degree=poly_degree, gamma="scale", coef0=1.0,
+                          C=1.0, probability=False, shrinking=True, cache_size=2000,
+                          random_state=RANDOM_STATE),
+        "SVM_RBF":    SVC(kernel="rbf", gamma="scale", C=1.0,
+                          probability=False, shrinking=True, cache_size=2000,
+                          random_state=RANDOM_STATE),
     }
+
     all_summaries = []
     results: Dict[str, CVResults] = {}
 
@@ -288,18 +342,13 @@ def task2_svm(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str, f
         results[name] = res
         all_summaries.append(summarize_cv(res))
 
-        # Confusion
         plot_confusion(res.y_true_all, res.y_pred_all, classes,
                        f"{name} – Confusion Matrix (5-fold aggregated)",
                        os.path.join(fig_dir, f"task2_{name}_confusion.png"))
-        # ROC/PR curves
         plot_multiclass_roc_pr(res.y_true_all, res.scores_all, classes, f"task2_{name}", fig_dir)
 
-    # Save kernel comparison
-    compare_df = pd.DataFrame(all_summaries)
-    compare_df.to_csv(os.path.join(out_dir, "task2_svm_kernel_comparison.csv"), index=True)
+    pd.DataFrame(all_summaries).to_csv(os.path.join(out_dir, "task2_svm_kernel_comparison.csv"), index=True)
     return results
-
 
 def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str, fig_dir: str):
     print("\n=== Task 3: KMeans Clustering (K=2..7) ===")
@@ -332,7 +381,7 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str
         inertias.append(km.inertia_)
         silhouettes.append(silhouette_score(Xs, cids))
 
-    # Elbow
+    # Elbow plot
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(k_values, inertias, marker="o")
     ax.set_title("Elbow Method (Inertia vs K)")
@@ -342,7 +391,7 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str
     fig.savefig(os.path.join(fig_dir, "task3_elbow.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # Silhouette
+    # Silhouette plot
     fig, ax = plt.subplots(figsize=(6, 4))
     ax.plot(k_values, silhouettes, marker="o")
     ax.set_title("Silhouette Score vs K")
@@ -352,57 +401,32 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str
     fig.savefig(os.path.join(fig_dir, "task3_silhouette.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # Save numeric values for report
+    # Save numeric results
     pd.DataFrame({"K": k_values, "Inertia": inertias, "Silhouette": silhouettes}).to_csv(
         os.path.join(out_dir, "task3_kmeans_metrics.csv"), index=False
     )
-
-    # -----------------------------
-# Utilities
-# -----------------------------
-def ensure_dirs(out_dir: str) -> Tuple[str, str]:
-    fig_dir = os.path.join(out_dir, "figures")
-    os.makedirs(fig_dir, exist_ok=True)
-    return out_dir, fig_dir
-
-
-def load_data(auto_path="data/lncRNA_5_Cancers.csv") -> Tuple[pd.DataFrame, pd.Series]:
-    """Load CSV automatically or raise error if not found."""
-    if not os.path.exists(auto_path):
-        raise FileNotFoundError(
-            f"Dataset not found: {auto_path}\n"
-            f"Please place 'lncRNA_5_Cancers.csv' inside a 'data' folder next to this script."
-        )
-    df = pd.read_csv(auto_path)
-    label_col_candidates = [c for c in df.columns if c.lower() in ("label", "cancer", "cancer_type", "class")]
-    label_col = label_col_candidates[0] if label_col_candidates else df.columns[-1]
-    y = df[label_col].astype(str)
-    X = df.drop(columns=[label_col]).apply(pd.to_numeric, errors="coerce").fillna(0.0)
-    print(f"✅ Loaded dataset '{auto_path}' with shape {X.shape} and label column '{label_col}'.")
-    return X, y
 
 # -----------------------------
 # Main
 # -----------------------------
 def main():
-    out_dir = "results"
-    out_dir, fig_dir = ensure_dirs(out_dir)
+    out_dir, fig_dir = ensure_dirs(OUT_DIR)
 
-    # Auto-load data
-    X, y = load_data()
+    # Load data
+    X, y = load_data(CSV_PATH)
     classes = np.unique(y).tolist()
 
-    # Run tasks
-    from HW4 import task1_knn, task2_svm, task3_kmeans, summarize_cv
+    plot_class_counts_from_y(y, out_dir, fig_dir, title="Class Counts", file_stem="class_counts")
+
+    # --- summaries per model ---
     knn_res = task1_knn(X, y, classes, out_dir, fig_dir)
-    svm_results = task2_svm(X, y, classes, out_dir, fig_dir)
-
-    summaries = [summarize_cv(knn_res)] + [summarize_cv(res) for res in svm_results.values()]
-    pd.DataFrame(summaries).to_csv(os.path.join(out_dir, "hw4_knn_svm_summary.csv"), index=True)
-
+    svm_results = task2_svm_drop(X, y, classes, out_dir, fig_dir, poly_degree=POLY_DEGREE)
     task3_kmeans(X, y, classes, out_dir, fig_dir)
-    print("\n🎉 All tasks completed successfully. Outputs saved to:", os.path.abspath(out_dir))
 
+    # Save one CSV with one row per model (KNN + each SVM)
+    save_all_summaries(knn_res, svm_results, out_dir)
+
+    print("\n All tasks completed successfully. Outputs saved to:", os.path.abspath(out_dir))
 
 if __name__ == "__main__":
     main()
