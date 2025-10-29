@@ -9,3 +9,4 @@ results/figures/
 venv/
 *.csv
 *lncRNA_5_Cancers.csv
+results/
