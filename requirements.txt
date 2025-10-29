@@ -1,4 +1,13 @@
-pandas
-numpy
-matplotlib
-scikit-learn
+# Core scientific and data analysis libraries
+numpy>=1.26.0
+pandas>=2.1.0
+matplotlib>=3.8.0
+
+# Scikit-learn for ML models, metrics, preprocessing, etc.
+scikit-learn>=1.4.0
+
+# Optional (used by some environments for plotting stability)
+seaborn>=0.13.0
+
+# Visualization helper
+umap-learn

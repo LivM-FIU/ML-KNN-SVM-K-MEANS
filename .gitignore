@@ -7,3 +7,5 @@ results/figures/
 *results/
 *reports/
 venv/
+*.csv
+*lncRNA_5_Cancers.csv

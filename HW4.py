@@ -20,6 +20,7 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC, LinearSVC
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
+from umap import UMAP
 
 from sklearn.metrics import (
     accuracy_score,
@@ -38,7 +39,7 @@ from sklearn.metrics import (
 # -----------------------------
 RANDOM_STATE = 42
 N_SPLITS = 5
-CSV_PATH = "data/lncRNA_5_Cancers.csv"  # put your CSV here
+CSV_PATH = "lncRNA_5_Cancers.csv"        # put your CSV here
 OUT_DIR = "results"                      # output folder
 POLY_DEGREE = 2                          # default polynomial degree
 
@@ -187,9 +188,6 @@ def save_all_summaries(knn_res: CVResults, svm_results: Dict[str, CVResults], ou
 def plot_class_counts_from_y(y: pd.Series, out_dir: str, fig_dir: str, title: str = "Class Counts", file_stem: str = "class_counts"):
     """
     ONE bar per class. Counts how many rows belong to each class in `y`.
-    Saves:
-      - {out_dir}/{file_stem}.csv  (table of counts)
-      - {fig_dir}/{file_stem}.png  (bar chart)
     """
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(fig_dir, exist_ok=True)
@@ -204,14 +202,28 @@ def plot_class_counts_from_y(y: pd.Series, out_dir: str, fig_dir: str, title: st
     counts_path = os.path.join(out_dir, f"{file_stem}.csv")
     counts.to_frame("count").to_csv(counts_path, index=True)
 
-    # Plot (pure matplotlib; one axes; no explicit colors)
+    # Plot
     fig, ax = plt.subplots(figsize=(8, 5))
-    ax.bar(range(len(counts)), counts.values)
+    bars = ax.bar(range(len(counts)), counts.values)
+
     ax.set_title(title)
     ax.set_xlabel("Class")
     ax.set_ylabel("Count")
     ax.set_xticks(range(len(counts)))
     ax.set_xticklabels(counts.index.astype(str), rotation=45, ha="right")
+
+    # Add count labels above each bar
+    for bar, count in zip(bars, counts.values):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            str(count),
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold"
+        )
+
     fig.tight_layout()
     png_path = os.path.join(fig_dir, f"{file_stem}.png")
     fig.savefig(png_path, dpi=150, bbox_inches="tight")
@@ -220,6 +232,7 @@ def plot_class_counts_from_y(y: pd.Series, out_dir: str, fig_dir: str, title: st
     print(f" Saved counts table: {counts_path}")
     print(f" Saved bar chart:   {png_path}")
     return counts
+
 
 def plot_confusion(y_true: List[str], y_pred: List[str], classes: List[str], title: str, outpath: str):
     cm = confusion_matrix(y_true, y_pred, labels=classes)
@@ -300,6 +313,70 @@ def plot_multiclass_roc_pr(y_true: List[str], scores: np.ndarray, classes: List[
     fig.savefig(os.path.join(fig_dir, f"{base_name}_pr.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+    # ===============================================================
+    # HELPER FUNCTION: Visualization for Task 3
+    # ===============================================================
+def plot_task3_visualizations(
+    X_vis, y_true, classes, cids, k, centroids_2d, fig_dir, prefix, method_name
+):
+    """
+    Generates:
+      1) True-label visualization (color = cancer type)
+      2) Cluster visualization (shape = cluster)
+      + Displays 2D centroids (already projected)
+    Assumes:
+      - X_vis: (n_samples, 2)
+      - centroids_2d: (k, 2)  [projected with the SAME transformer as X_vis]
+    """
+    os.makedirs(fig_dir, exist_ok=True)
+
+    # --- Defensive guard: ensure we only plot exactly K centroids
+    if centroids_2d.ndim != 2 or centroids_2d.shape[1] != 2:
+        raise ValueError(f"[{prefix}/{method_name}] centroids_2d must be (k,2); got {centroids_2d.shape}")
+    if centroids_2d.shape[0] != k:
+        # slice or pad (slice is safest)
+        centroids_2d = centroids_2d[:k, :]
+
+    true_labels = pd.Categorical(y_true, categories=classes).codes
+    markers = ['o', 's', 'D', '^', 'v', '<', '>']
+
+    # (1) Colored by true labels
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for idx, cname in enumerate(classes):
+        mask = (true_labels == idx)
+        ax.scatter(X_vis[mask, 0], X_vis[mask, 1], label=cname, s=12, alpha=0.85)
+    ax.scatter(
+        centroids_2d[:, 0], centroids_2d[:, 1],
+        s=150, c='black', marker='X', label='Centroid', edgecolor='white'
+    )
+    ax.set_title(f"{prefix} (K={k}) – {method_name} colored by true labels")
+    ax.set_xlabel(f"{method_name}-1"); ax.set_ylabel(f"{method_name}-2")
+    ax.legend(fontsize=8, markerscale=1.2)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, f"k{k}_{method_name.lower()}_true_labels.png"),
+                dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    # (2) Shapes by cluster assignment
+    fig, ax = plt.subplots(figsize=(6, 5))
+    for cid in range(k):
+        mask = (cids == cid)
+        ax.scatter(
+            X_vis[mask, 0], X_vis[mask, 1],
+            label=f"Cluster {cid+1}", s=25, alpha=0.8,
+            marker=markers[cid % len(markers)]
+        )
+    ax.scatter(
+        centroids_2d[:, 0], centroids_2d[:, 1],
+        s=150, c='black', marker='X', label='Centroid', edgecolor='white'
+    )
+    ax.set_title(f"{prefix} (K={k}) – {method_name} shapes = clusters")
+    ax.set_xlabel(f"{method_name}-1"); ax.set_ylabel(f"{method_name}-2")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(os.path.join(fig_dir, f"k{k}_{method_name.lower()}_clusters.png"),
+                dpi=150, bbox_inches="tight")
+    plt.close(fig)
 # -----------------------------
 # Tasks
 # -----------------------------
@@ -350,61 +427,136 @@ def task2_svm_drop(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: s
     pd.DataFrame(all_summaries).to_csv(os.path.join(out_dir, "task2_svm_kernel_comparison.csv"), index=True)
     return results
 
-def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: List[str], out_dir: str, fig_dir: str):
-    print("\n=== Task 3: KMeans Clustering (K=2..7) ===")
-    scaler = StandardScaler()
-    Xs = scaler.fit_transform(X)
-    pca = PCA(n_components=2, random_state=RANDOM_STATE)
-    X2d = pca.fit_transform(Xs)
+def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig_dir: str):
+    """
+    Task 3: KMeans Clustering (K=2..7)
+      • V1: KMeans on standardized original features (no PCA for clustering)
+      • V2: KMeans on top-5 000 variance features + PCA(100) for clustering
+      • Visualizations for PCA(2) and UMAP(2), with centroids
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    os.makedirs(fig_dir, exist_ok=True)
+
+    def plot_metric(k_values, values, title, ylabel, path):
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.plot(k_values, values, marker="o")
+        ax.set_title(title)
+        ax.set_xlabel("K")
+        ax.set_ylabel(ylabel)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
 
     k_values = list(range(2, 8))
-    inertias, silhouettes = [], []
-    true_labels = pd.Categorical(y, categories=classes).codes  # 0..C-1
+    RANDOM_STATE = 42
+
+    # ===============================================================
+    # VERSION 1 — KMeans on standardized original features
+    # ===============================================================
+    print("\n=== Task 3 (V1): KMeans on standardized original features ===")
+    v1_out, v1_fig = os.path.join(out_dir, "v1"), os.path.join(fig_dir, "v1")
+    os.makedirs(v1_out, exist_ok=True)
+    os.makedirs(v1_fig, exist_ok=True)
+
+    scaler = StandardScaler()
+    Xs_v1 = scaler.fit_transform(X)
+
+    # PCA(2) for visualization only
+    pca_vis = PCA(n_components=2, random_state=RANDOM_STATE)
+    X2d_v1 = pca_vis.fit_transform(Xs_v1)
+
+    inertias_v1, silhouettes_v1 = [], []
 
     for k in k_values:
         km = KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE)
-        cids = km.fit_predict(Xs)
+        cids = km.fit_predict(Xs_v1)
 
-        # PCA visualization: colored by TRUE labels (as assignment requests)
-        fig, ax = plt.subplots(figsize=(6, 5))
-        for idx, cname in enumerate(classes):
-            mask = (true_labels == idx)
-            ax.scatter(X2d[mask, 0], X2d[mask, 1], label=cname, s=12, alpha=0.85)
-        ax.set_title(f"KMeans Visualization (K={k}) – points colored by true cancer type")
-        ax.set_xlabel("PCA1")
-        ax.set_ylabel("PCA2")
-        ax.legend(fontsize=8, markerscale=1.2)
-        fig.tight_layout()
-        fig.savefig(os.path.join(fig_dir, f"task3_k{k}_pca.png"), dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        # Project centroids to the SAME PCA(2) used for X2d_v1
+        centroids_pca2 = pca_vis.transform(km.cluster_centers_)
+        if centroids_pca2.shape[0] != k:
+            centroids_pca2 = centroids_pca2[:k, :]
 
-        inertias.append(km.inertia_)
-        silhouettes.append(silhouette_score(Xs, cids))
+        plot_task3_visualizations(
+            X2d_v1, y, classes, cids, k, centroids_pca2,
+            v1_fig, "V1 KMeans", "PCA2"
+        )
 
-    # Elbow plot
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(k_values, inertias, marker="o")
-    ax.set_title("Elbow Method (Inertia vs K)")
-    ax.set_xlabel("K")
-    ax.set_ylabel("Inertia")
-    fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "task3_elbow.png"), dpi=150, bbox_inches="tight")
-    plt.close(fig)
+        inertias_v1.append(km.inertia_)
+        silhouettes_v1.append(silhouette_score(Xs_v1, cids))
 
-    # Silhouette plot
-    fig, ax = plt.subplots(figsize=(6, 4))
-    ax.plot(k_values, silhouettes, marker="o")
-    ax.set_title("Silhouette Score vs K")
-    ax.set_xlabel("K")
-    ax.set_ylabel("Silhouette Score")
-    fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, "task3_silhouette.png"), dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    plot_metric(k_values, inertias_v1, "Elbow Method (V1)", "Inertia",
+                os.path.join(v1_fig, "elbow.png"))
+    plot_metric(k_values, silhouettes_v1, "Silhouette Score (V1)", "Silhouette",
+                os.path.join(v1_fig, "silhouette.png"))
+    pd.DataFrame({"K": k_values, "Inertia": inertias_v1, "Silhouette": silhouettes_v1}).to_csv(
+        os.path.join(v1_out, "metrics.csv"), index=False)
+    print("✅ V1 results saved successfully.")
 
-    # Save numeric results
-    pd.DataFrame({"K": k_values, "Inertia": inertias, "Silhouette": silhouettes}).to_csv(
-        os.path.join(out_dir, "task3_kmeans_metrics.csv"), index=False
-    )
+    # ===============================================================
+    # VERSION 2 — Top 5000 variance + PCA(100) + UMAP(2)
+    # ===============================================================
+    print("\n=== Task 3 (V2): KMeans with Feature Selection + PCA(100) + UMAP ===")
+    v2_out, v2_fig = os.path.join(out_dir, "v2"), os.path.join(fig_dir, "v2")
+    os.makedirs(v2_out, exist_ok=True)
+    os.makedirs(v2_fig, exist_ok=True)
+
+    print("Selecting top 5000 high-variance features…")
+    variances = X.var(axis=0)
+    top_genes = variances.nlargest(5000).index
+    X_sel = X[top_genes]
+
+    scaler = StandardScaler()
+    Xs_v2 = scaler.fit_transform(X_sel)
+
+    # PCA(100) for clustering
+    pca_100 = PCA(n_components=100, random_state=RANDOM_STATE)
+    X_pca100 = pca_100.fit_transform(Xs_v2)
+
+    # Visualization embeddings (PCA2 + UMAP2)
+    print("Computing visualization embeddings…")
+    pca_2 = PCA(n_components=2, random_state=RANDOM_STATE)
+    X2d_pca = pca_2.fit_transform(X_pca100)
+    umap_2 = UMAP(n_components=2, random_state=RANDOM_STATE)
+    X2d_umap = umap_2.fit_transform(X_pca100)
+
+    inertias_v2, silhouettes_v2 = [], []
+
+    for k in k_values:
+        km = KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE)
+        cids = km.fit_predict(X_pca100)
+
+        # Project centroids into PCA(2) and UMAP(2) spaces
+        centroids_pca2 = pca_2.transform(km.cluster_centers_)
+        if centroids_pca2.shape[0] != k:
+            centroids_pca2 = centroids_pca2[:k, :]
+
+        centroids_umap2 = umap_2.transform(km.cluster_centers_)
+        if centroids_umap2.shape[0] != k:
+            centroids_umap2 = centroids_umap2[:k, :]
+
+        # Visualize both spaces
+        plot_task3_visualizations(
+            X2d_pca, y, classes, cids, k, centroids_pca2,
+            v2_fig, "V2 KMeans", "PCA2"
+        )
+        plot_task3_visualizations(
+            X2d_umap, y, classes, cids, k, centroids_umap2,
+            v2_fig, "V2 KMeans", "UMAP2"
+        )
+
+        inertias_v2.append(km.inertia_)
+        silhouettes_v2.append(silhouette_score(X_pca100, cids))
+
+
+    plot_metric(k_values, inertias_v2, "Elbow Method (V2)", "Inertia",
+                os.path.join(v2_fig, "elbow.png"))
+    plot_metric(k_values, silhouettes_v2, "Silhouette Score (V2)", "Silhouette",
+                os.path.join(v2_fig, "silhouette.png"))
+    pd.DataFrame({"K": k_values, "Inertia": inertias_v2, "Silhouette": silhouettes_v2}).to_csv(
+        os.path.join(v2_out, "metrics.csv"), index=False)
+    print(" V2 results (PCA100 + UMAP visualization + centroids) saved successfully.")
+
+    print("\nTask 3 complete — both versions executed and saved.")
 
 # -----------------------------
 # Main
@@ -419,12 +571,15 @@ def main():
     plot_class_counts_from_y(y, out_dir, fig_dir, title="Class Counts", file_stem="class_counts")
 
     # --- summaries per model ---
-    knn_res = task1_knn(X, y, classes, out_dir, fig_dir)
-    svm_results = task2_svm_drop(X, y, classes, out_dir, fig_dir, poly_degree=POLY_DEGREE)
-    task3_kmeans(X, y, classes, out_dir, fig_dir)
+    # knn_res = task1_knn(X, y, classes, out_dir, fig_dir)
+    # svm_results = task2_svm_drop(X, y, classes, out_dir, fig_dir, poly_degree=POLY_DEGREE)
 
     # Save one CSV with one row per model (KNN + each SVM)
-    save_all_summaries(knn_res, svm_results, out_dir)
+    # save_all_summaries(knn_res, svm_results, out_dir)
+
+
+    task3_kmeans(X, y, classes, out_dir, fig_dir)
+
 
     print("\n All tasks completed successfully. Outputs saved to:", os.path.abspath(out_dir))
 
