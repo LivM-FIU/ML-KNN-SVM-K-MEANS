@@ -340,11 +340,20 @@ def plot_task3_visualizations(
     true_labels = pd.Categorical(y_true, categories=classes).codes
     markers = ['o', 's', 'D', '^', 'v', '<', '>']
 
+    # Fixed color palette for all visualizations (5 classes → 5 colors)
+    cmap = plt.get_cmap("tab10", max(len(classes), 5))
+    color_map = {cls: cmap(i % cmap.N) for i, cls in enumerate(classes)}
+    y_array = np.asarray(y_true)
+
     # (1) Colored by true labels
     fig, ax = plt.subplots(figsize=(6, 5))
     for idx, cname in enumerate(classes):
         mask = (true_labels == idx)
-        ax.scatter(X_vis[mask, 0], X_vis[mask, 1], label=cname, s=12, alpha=0.85)
+        ax.scatter(
+            X_vis[mask, 0], X_vis[mask, 1],
+            label=cname, s=12, alpha=0.85,
+            color=color_map[cname]
+        )
     ax.scatter(
         centroids_2d[:, 0], centroids_2d[:, 1],
         s=150, c='black', marker='X', label='Centroid', edgecolor='white'
@@ -361,18 +370,48 @@ def plot_task3_visualizations(
     fig, ax = plt.subplots(figsize=(6, 5))
     for cid in range(k):
         mask = (cids == cid)
+        if not np.any(mask):
+            continue
+
+        indices = np.where(mask)[0]
+        colors = [color_map[y_array[idx]] for idx in indices]
+
         ax.scatter(
             X_vis[mask, 0], X_vis[mask, 1],
-            label=f"Cluster {cid+1}", s=25, alpha=0.8,
-            marker=markers[cid % len(markers)]
+            s=25, alpha=0.8,
+            marker=markers[cid % len(markers)],
+            c=colors, edgecolor='black', linewidths=0.4
         )
+
     ax.scatter(
         centroids_2d[:, 0], centroids_2d[:, 1],
         s=150, c='black', marker='X', label='Centroid', edgecolor='white'
     )
-    ax.set_title(f"{prefix} (K={k}) – {method_name} shapes = clusters")
+
+    from matplotlib.lines import Line2D
+
+    class_handles = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[cname],
+               markeredgecolor='black', markersize=7, label=cname)
+        for cname in classes
+    ]
+    cluster_handles = [
+        Line2D([0], [0], marker=markers[cid % len(markers)], color='black',
+               markerfacecolor='white', markersize=7, label=f"Cluster {cid+1}")
+        for cid in range(k)
+    ]
+    centroid_handle = Line2D([0], [0], marker='X', color='black', markerfacecolor='black',
+                              markersize=8, label='Centroid')
+
+    ax.set_title(f"{prefix} (K={k}) – {method_name} shapes = clusters, colors = true labels")
     ax.set_xlabel(f"{method_name}-1"); ax.set_ylabel(f"{method_name}-2")
-    ax.legend(fontsize=8)
+
+    legend1 = ax.legend(handles=class_handles, title="True Labels", fontsize=8,
+                        loc='upper right')
+    ax.add_artist(legend1)
+    legend2 = ax.legend(handles=cluster_handles + [centroid_handle], title="Clusters",
+                        fontsize=8, loc='lower right')
+
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"k{k}_{method_name.lower()}_clusters.png"),
                 dpi=150, bbox_inches="tight")
