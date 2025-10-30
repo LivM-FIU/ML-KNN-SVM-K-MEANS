@@ -4,9 +4,7 @@ data/
 results/figures/
 *.ipynb_checkpoints
 .env
-*results/
-*reports/
+results/
 venv/
 *.csv
 *lncRNA_5_Cancers.csv
-results/
