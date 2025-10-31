@@ -7,7 +7,7 @@ CAP5610 HW4 (DROP version, no CLI): KNN, SVM (Linear/Poly/RBF), KMeans on lncRNA
 """
 import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -83,40 +83,6 @@ def compute_multiclass_auc(y_true: np.ndarray, y_score: np.ndarray, classes: Lis
     roc_auc = roc_auc_score(y_bin, y_score, average="macro", multi_class="ovr")
     pr_auc = average_precision_score(y_bin, y_score, average="macro")
     return float(roc_auc), float(pr_auc)
-
-
-def trimmed_inlier_mask(X: np.ndarray, fraction_to_trim: float = 0.05) -> np.ndarray:
-    """Return a boolean mask marking inliers after trimming the most distant samples.
-
-    The mask is built using squared Euclidean distance to the feature-wise median,
-    which makes it robust to extreme values compared to the mean.  The farthest
-    ``fraction_to_trim`` samples are flagged as outliers.  When ``fraction_to_trim``
-    is zero or the dataset is too small, the function falls back to keeping all
-    samples.
-    """
-
-    if X.ndim != 2:
-        raise ValueError("trimmed_inlier_mask expects a 2D array of shape (n_samples, n_features)")
-
-    n_samples = X.shape[0]
-    if n_samples == 0:
-        return np.zeros(0, dtype=bool)
-
-    fraction_to_trim = float(np.clip(fraction_to_trim, 0.0, 0.49))
-    # If trimming would discard fewer than one sample, keep everything.
-    if fraction_to_trim == 0.0 or n_samples * fraction_to_trim < 1.0:
-        return np.ones(n_samples, dtype=bool)
-
-    median = np.median(X, axis=0)
-    squared_dist = np.sum((X - median) ** 2, axis=1)
-    threshold = np.quantile(squared_dist, 1.0 - fraction_to_trim)
-    mask = squared_dist <= threshold
-
-    # Guard against degenerate cases (e.g., all points identical)
-    if mask.sum() == 0:
-        mask[:] = True
-
-    return mask
 
 def run_cv_pipeline(name: str, estimator, X: pd.DataFrame, y: pd.Series, classes: List[str]) -> CVResults:
     skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=RANDOM_STATE)
@@ -544,29 +510,14 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
-
     def medoid_centroids_2d(X2d: np.ndarray, cids: np.ndarray, k: int) -> np.ndarray:
         """
         Robust centroids in 2D via cluster medoids (actual points minimizing total intra-cluster distance).
         Immune to outliers pulling the centroid.
         """
-        if valid_mask is None:
-            valid_mask = np.ones(len(X2d), dtype=bool)
-        else:
-            valid_mask = np.asarray(valid_mask, dtype=bool)
-            if valid_mask.shape[0] != X2d.shape[0]:
-                raise ValueError("valid_mask must have the same length as X2d")
-
         C = np.full((k, 2), np.nan, dtype=float)
         for cid in range(k):
-            cluster_mask = (cids == cid)
-            inlier_points = X2d[cluster_mask & valid_mask]
-            if inlier_points.shape[0] == 0:
-                # Fall back to all points from the cluster (may include outliers)
-                P = X2d[cluster_mask]
-            else:
-                P = inlier_points
-
+            P = X2d[cids == cid]
             if P.shape[0] == 0:
                 continue
             if P.shape[0] == 1:
@@ -618,15 +569,6 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
     scaler = StandardScaler()
     Xs_v1 = scaler.fit_transform(X)
 
-    inlier_mask_v1 = trimmed_inlier_mask(Xs_v1, fraction_to_trim=0.05)
-    if inlier_mask_v1.sum() <= max(k_values):
-        # Not enough samples remain to support the full range of K; keep everything.
-        inlier_mask_v1 = np.ones_like(inlier_mask_v1, dtype=bool)
-        print(" [V1] Skipping trimming because it would remove too many samples.")
-    else:
-        removed = (~inlier_mask_v1).sum()
-        print(f" [V1] Trimmed {removed} potential outliers before clustering (fraction=5%).")
-
     # PCA(2) for visualization only
     pca_vis = PCA(n_components=2, random_state=RANDOM_STATE)
     X2d_v1 = pca_vis.fit_transform(Xs_v1)
@@ -640,24 +582,19 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
             n_init=50,                 # more restarts for stability
             random_state=RANDOM_STATE
         )
-        X_fit = Xs_v1[inlier_mask_v1]
-        cids_inliers = km.fit_predict(X_fit)
-        cids_all = km.predict(Xs_v1)
+        cids = km.fit_predict(Xs_v1)
 
         # Robust centroids in the SAME 2D plotting space (medoids)
-        centroids_2d = medoid_centroids_2d(X2d_v1, cids_all, k, valid_mask=inlier_mask_v1)
+        centroids_2d = medoid_centroids_2d(X2d_v1, cids, k)
 
         # Single clusters+labels plot (your helper should now only generate this one)
         _plot_with_centroids_safe(
-            X2d_v1, y, classes, cids_all, k,
+            X2d_v1, y, classes, cids, k,
             v1_fig, "V1 KMeans", "PCA2", centroids_2d
         )
 
         inertias_v1.append(km.inertia_)
-        try:
-            silhouettes_v1.append(silhouette_score(X_fit, cids_inliers))
-        except ValueError:
-            silhouettes_v1.append(np.nan)
+        silhouettes_v1.append(silhouette_score(Xs_v1, cids))
 
     plot_metric(k_values, inertias_v1,   "Elbow Method (V1)",      "Inertia",
                 os.path.join(v1_fig, "elbow.png"),      color="tab:blue",  marker="o")
@@ -687,14 +624,6 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
     pca_100 = PCA(n_components=100, random_state=RANDOM_STATE)
     X_pca100 = pca_100.fit_transform(Xs_v2)
 
-    inlier_mask_v2 = trimmed_inlier_mask(X_pca100, fraction_to_trim=0.05)
-    if inlier_mask_v2.sum() <= max(k_values):
-        inlier_mask_v2 = np.ones_like(inlier_mask_v2, dtype=bool)
-        print(" [V2] Skipping trimming because it would remove too many samples.")
-    else:
-        removed_v2 = (~inlier_mask_v2).sum()
-        print(f" [V2] Trimmed {removed_v2} potential outliers before clustering (fraction=5%).")
-
     # Visualization embeddings (PCA2 + UMAP2)
     print("Computing visualization embeddings…")
     pca_2 = PCA(n_components=2, random_state=RANDOM_STATE)
@@ -711,31 +640,26 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
             n_init=50,
             random_state=RANDOM_STATE
         )
-        X_fit_v2 = X_pca100[inlier_mask_v2]
-        cids_inliers_v2 = km.fit_predict(X_fit_v2)
-        cids_all_v2 = km.predict(X_pca100)
+        cids = km.fit_predict(X_pca100)
 
         # Robust centroids in each 2D space (medoids)
-        centroids_pca2 = medoid_centroids_2d(X2d_pca, cids_all_v2, k, valid_mask=inlier_mask_v2)
-        centroids_umap2 = medoid_centroids_2d(X2d_umap, cids_all_v2, k, valid_mask=inlier_mask_v2)
+        centroids_pca2 = medoid_centroids_2d(X2d_pca, cids, k)
+        centroids_umap2 = medoid_centroids_2d(X2d_umap, cids, k)
 
         # PCA2 view
         _plot_with_centroids_safe(
-            X2d_pca, y, classes, cids_all_v2, k,
+            X2d_pca, y, classes, cids, k,
             v2_fig, "V2 KMeans", "PCA2", centroids_pca2
         )
 
         # UMAP2 view
         _plot_with_centroids_safe(
-            X2d_umap, y, classes, cids_all_v2, k,
+            X2d_umap, y, classes, cids, k,
             v2_fig, "V2 KMeans", "UMAP2", centroids_umap2
         )
 
         inertias_v2.append(km.inertia_)
-        try:
-            silhouettes_v2.append(silhouette_score(X_fit_v2, cids_inliers_v2))
-        except ValueError:
-            silhouettes_v2.append(np.nan)
+        silhouettes_v2.append(silhouette_score(X_pca100, cids))
 
     plot_metric(k_values, inertias_v2,   "Elbow Method (V2)",      "Inertia",
             os.path.join(v2_fig, "elbow.png"),      color="tab:green", marker="o")
