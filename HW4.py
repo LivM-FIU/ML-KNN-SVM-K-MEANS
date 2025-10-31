@@ -12,6 +12,8 @@ from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from scipy.spatial.distance import cdist
 
 from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler, label_binarize
@@ -20,19 +22,9 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC, LinearSVC
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
-from umap import UMAP
+from sklearn.metrics import (accuracy_score,precision_recall_fscore_support,confusion_matrix,roc_curve,auc,average_precision_score,roc_auc_score,precision_recall_curve,silhouette_score,)
 
-from sklearn.metrics import (
-    accuracy_score,
-    precision_recall_fscore_support,
-    confusion_matrix,
-    roc_curve,
-    auc,
-    average_precision_score,
-    roc_auc_score,
-    precision_recall_curve,
-    silhouette_score,
-)
+from umap import UMAP
 
 # -----------------------------
 # Config (edit here if needed)
@@ -233,7 +225,6 @@ def plot_class_counts_from_y(y: pd.Series, out_dir: str, fig_dir: str, title: st
     print(f" Saved bar chart:   {png_path}")
     return counts
 
-
 def plot_confusion(y_true: List[str], y_pred: List[str], classes: List[str], title: str, outpath: str):
     cm = confusion_matrix(y_true, y_pred, labels=classes)
     fig, ax = plt.subplots(figsize=(6, 5))
@@ -252,62 +243,42 @@ def plot_confusion(y_true: List[str], y_pred: List[str], classes: List[str], tit
 
 def plot_multiclass_roc_pr(y_true: List[str], scores: np.ndarray, classes: List[str], base_name: str, fig_dir: str):
     """
-    Plot OvR ROC and PR curves (per-class) and a macro curve.
+    Plot OvR ROC and PR curves (per-class only).
     Saves two figures: *_roc.png and *_pr.png
     """
     y_bin = label_binarize(np.array(y_true), classes=classes)
     n_classes = len(classes)
 
-    # ---------- ROC ----------
+    # ---------- ROC (per class only) ----------
     fpr, tpr, roc_auc = {}, {}, {}
     for i in range(n_classes):
         fpr[i], tpr[i], _ = roc_curve(y_bin[:, i], scores[:, i])
         roc_auc[i] = auc(fpr[i], tpr[i])
 
-    # Macro ROC (area via macro mean of TPR over a common FPR grid)
-    all_fpr = np.unique(np.concatenate([fpr[i] for i in range(n_classes)]))
-    mean_tpr = np.zeros_like(all_fpr)
-    for i in range(n_classes):
-        mean_tpr += np.interp(all_fpr, fpr[i], tpr[i])
-    mean_tpr /= n_classes
-    roc_auc_macro = auc(all_fpr, mean_tpr)
-
     fig, ax = plt.subplots(figsize=(6, 5))
     for i in range(n_classes):
         ax.plot(fpr[i], tpr[i], label=f"{classes[i]} (AUC={roc_auc[i]:.2f})")
-
-    ax.plot(all_fpr, mean_tpr, linestyle="-.", label=f"macro (AUC={roc_auc_macro:.2f})")
     ax.plot([0, 1], [0, 1], linestyle=":")
     ax.set_title(f"{base_name} – ROC (OvR)")
-    ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{base_name}_roc.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
-    # ---------- PR ----------
+    # ---------- PR (per class only) ----------
     pr, rc, pr_ap = {}, {}, {}
     for i in range(n_classes):
         pr[i], rc[i], _ = precision_recall_curve(y_bin[:, i], scores[:, i])
-        pr_ap[i] = average_precision_score(y_bin[:, i], scores[:, i])  # AP per class
-
-    # Authoritative macro-AP (no plotting needed for this number)
-    macro_ap_score = average_precision_score(y_bin, scores, average="macro")
-
-    recall_grid = np.linspace(0, 1, 1000)
-    mean_precision = np.zeros_like(recall_grid)
-    for i in range(n_classes):
-        mean_precision += np.interp(recall_grid, rc[i][::-1], pr[i][::-1])
-    mean_precision /= n_classes
-    # Area under the macro curve 
-    macro_ap_curve = np.trapezoid(mean_precision, recall_grid)
+        pr_ap[i] = average_precision_score(y_bin[:, i], scores[:, i])
 
     fig, ax = plt.subplots(figsize=(6, 5))
     for i in range(n_classes):
         ax.plot(rc[i], pr[i], label=f"{classes[i]} (AP={pr_ap[i]:.2f})")
-    ax.plot(recall_grid, mean_precision, linestyle="-.", label=f"macro (AP≈{macro_ap_curve:.2f}; score={macro_ap_score:.2f})")
     ax.set_title(f"{base_name} – PR (OvR)")
-    ax.set_xlabel("Recall"); ax.set_ylabel("Precision")
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
     ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(os.path.join(fig_dir, f"{base_name}_pr.png"), dpi=150, bbox_inches="tight")
@@ -316,106 +287,101 @@ def plot_multiclass_roc_pr(y_true: List[str], scores: np.ndarray, classes: List[
     # ===============================================================
     # HELPER FUNCTION: Visualization for Task 3
     # ===============================================================
-def plot_task3_visualizations(
-    X_vis, y_true, classes, cids, k, centroids_2d, fig_dir, prefix, method_name
-):
+
+def plot_task3_visualizations( X_vis,y_true, classes,cids, k, fig_dir, prefix, method_name, figsize=(9, 6), legend_out=True, centroid_override_2d=None, ):
     """
-    Generates:
-      1) True-label visualization (color = cancer type)
-      2) Cluster visualization (shape = cluster)
-      + Displays 2D centroids (already projected)
-    Assumes:
-      - X_vis: (n_samples, 2)
-      - centroids_2d: (k, 2)  [projected with the SAME transformer as X_vis]
+    Single figure ONLY:
+      • Points = data, colored by TRUE labels
+      • Shapes = cluster assignment (different marker per cluster)
+      • Centroids (X) = optionally overridden by centroid_override_2d
     """
     os.makedirs(fig_dir, exist_ok=True)
 
-    # --- Defensive guard: ensure we only plot exactly K centroids
-    if centroids_2d.ndim != 2 or centroids_2d.shape[1] != 2:
-        raise ValueError(f"[{prefix}/{method_name}] centroids_2d must be (k,2); got {centroids_2d.shape}")
-    if centroids_2d.shape[0] != k:
-        # slice or pad (slice is safest)
-        centroids_2d = centroids_2d[:k, :]
+    X_vis = np.asarray(X_vis)
+    if X_vis.ndim != 2 or X_vis.shape[1] != 2:
+        raise ValueError(f"{prefix}/{method_name}: X_vis must be (n,2); got {X_vis.shape}")
 
-    true_labels = pd.Categorical(y_true, categories=classes).codes
-    markers = ['o', 's', 'D', '^', 'v', '<', '>']
-
-    # Fixed color palette for all visualizations (5 classes → 5 colors)
+    # Stable color map for true labels
     cmap = plt.get_cmap("tab10", max(len(classes), 5))
     color_map = {cls: cmap(i % cmap.N) for i, cls in enumerate(classes)}
-    y_array = np.asarray(y_true)
+    y_arr = np.asarray(y_true)
 
-    # (1) Colored by true labels
-    fig, ax = plt.subplots(figsize=(6, 5))
-    for idx, cname in enumerate(classes):
-        mask = (true_labels == idx)
-        ax.scatter(
-            X_vis[mask, 0], X_vis[mask, 1],
-            label=cname, s=12, alpha=0.85,
-            color=color_map[cname]
-        )
-    ax.scatter(
-        centroids_2d[:, 0], centroids_2d[:, 1],
-        s=150, c='black', marker='X', label='Centroid', edgecolor='white'
-    )
-    ax.set_title(f"{prefix} (K={k}) – {method_name} colored by true labels")
-    ax.set_xlabel(f"{method_name}-1"); ax.set_ylabel(f"{method_name}-2")
-    ax.legend(fontsize=8, markerscale=1.2)
-    fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"k{k}_{method_name.lower()}_true_labels.png"),
-                dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    # Markers by cluster
+    markers = ['o', 's', 'D', '^', 'v', '<', '>']
 
-    # (2) Shapes by cluster assignment
-    fig, ax = plt.subplots(figsize=(6, 5))
+    # If no override centroids, compute standard mean in 2D
+    if centroid_override_2d is None:
+        centroids_2d = []
+        for cid in range(k):
+            m = (cids == cid)
+            if np.any(m):
+                centroids_2d.append(X_vis[m].mean(axis=0))
+        centroids_2d = np.array(centroids_2d)
+    else:
+        centroids_2d = np.asarray(centroid_override_2d)
+        if centroids_2d.shape != (k, 2):
+            raise ValueError(f"{prefix}/{method_name}: centroid_override_2d must be (k,2); got {centroids_2d.shape}")
+
+    # -------- CLUSTERS plot (colors = true labels; shapes = clusters) --------
+    fig, ax = plt.subplots(figsize=figsize, constrained_layout=False)
+
     for cid in range(k):
         mask = (cids == cid)
         if not np.any(mask):
             continue
-
-        indices = np.where(mask)[0]
-        colors = [color_map[y_array[idx]] for idx in indices]
-
+        idxs = np.where(mask)[0]
+        colors = [color_map[y_arr[i]] for i in idxs]
         ax.scatter(
             X_vis[mask, 0], X_vis[mask, 1],
-            s=25, alpha=0.8,
+            s=28, alpha=0.85, c=colors,
             marker=markers[cid % len(markers)],
-            c=colors, edgecolor='black', linewidths=0.4
+            edgecolor='black', linewidths=0.4,
+            label=f"Cluster {cid+1}"
         )
 
-    ax.scatter(
-        centroids_2d[:, 0], centroids_2d[:, 1],
-        s=150, c='black', marker='X', label='Centroid', edgecolor='white'
-    )
-
-    from matplotlib.lines import Line2D
-
-    class_handles = [
-        Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[cname],
-               markeredgecolor='black', markersize=7, label=cname)
-        for cname in classes
-    ]
-    cluster_handles = [
-        Line2D([0], [0], marker=markers[cid % len(markers)], color='black',
-               markerfacecolor='white', markersize=7, label=f"Cluster {cid+1}")
-        for cid in range(k)
-    ]
-    centroid_handle = Line2D([0], [0], marker='X', color='black', markerfacecolor='black',
-                              markersize=8, label='Centroid')
+    if centroids_2d.size > 0:
+        ax.scatter(
+            centroids_2d[:, 0], centroids_2d[:, 1],
+            s=170, c='red', marker='X',
+            edgecolor='white', linewidths=0.7,
+            label='Centroid'
+        )
 
     ax.set_title(f"{prefix} (K={k}) – {method_name} shapes = clusters, colors = true labels")
     ax.set_xlabel(f"{method_name}-1"); ax.set_ylabel(f"{method_name}-2")
 
-    legend1 = ax.legend(handles=class_handles, title="True Labels", fontsize=8,
-                        loc='upper right')
-    ax.add_artist(legend1)
-    legend2 = ax.legend(handles=cluster_handles + [centroid_handle], title="Clusters",
-                        fontsize=8, loc='lower right')
+    # Legends: keep TRUE-LABEL color legend + cluster/centroid legend
+    class_handles = [
+        Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[cname],
+               markeredgecolor='black', markersize=8, label=cname)
+        for cname in classes
+    ]
+    cluster_handles = [Line2D([0], [0], marker=m, color='black',
+                              markerfacecolor='white', markersize=8, label=f"Cluster {i+1}")
+                       for i, m in enumerate(markers[:k])]
+    centroid_handle = Line2D([0], [0], marker='X', color='black', markerfacecolor='red',
+                             markersize=9, label='Centroid')
+
+    if legend_out:
+        # push plot left and put legends outside on the right
+        plt.subplots_adjust(right=0.78)
+        leg1 = ax.legend(handles=class_handles, title="True Labels",
+                         fontsize=9, loc='upper left', bbox_to_anchor=(1.02, 1.0))
+        ax.add_artist(leg1)
+        ax.legend(handles=cluster_handles + [centroid_handle], title="Clusters",
+                  fontsize=9, loc='lower left', bbox_to_anchor=(1.02, 0.0))
+    else:
+        leg1 = ax.legend(handles=class_handles, title="True Labels",
+                         fontsize=9, loc='upper right')
+        ax.add_artist(leg1)
+        ax.legend(handles=cluster_handles + [centroid_handle], title="Clusters",
+                  fontsize=9, loc='lower right')
 
     fig.tight_layout()
-    fig.savefig(os.path.join(fig_dir, f"k{k}_{method_name.lower()}_clusters.png"),
-                dpi=150, bbox_inches="tight")
+    out_path = os.path.join(fig_dir, f"k{k}_{method_name.lower()}_clusters.png")
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
 # -----------------------------
 # Tasks
 # -----------------------------
@@ -470,12 +436,15 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
     """
     Task 3: KMeans Clustering (K=2..7)
       • V1: KMeans on standardized original features (no PCA for clustering)
-      • V2: KMeans on top-5 000 variance features + PCA(100) for clustering
-      • Visualizations for PCA(2) and UMAP(2), with centroids
+            -> Visualize in PCA(2); centroids = robust medoids in 2D (resistant to outliers).
+      • V2: KMeans on top-5,000 variance features + PCA(100) for clustering
+            -> Visualize in PCA(2) and UMAP(2); centroids = robust medoids in 2D.
+
     """
     os.makedirs(out_dir, exist_ok=True)
     os.makedirs(fig_dir, exist_ok=True)
 
+    # ---------- local helpers ----------
     def plot_metric(k_values, values, title, ylabel, path):
         fig, ax = plt.subplots(figsize=(6, 4))
         ax.plot(k_values, values, marker="o")
@@ -486,6 +455,51 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         fig.savefig(path, dpi=150, bbox_inches="tight")
         plt.close(fig)
 
+    def medoid_centroids_2d(X2d: np.ndarray, cids: np.ndarray, k: int) -> np.ndarray:
+        """
+        Robust centroids in 2D via cluster medoids (actual points minimizing total intra-cluster distance).
+        Immune to outliers pulling the centroid.
+        """
+        C = np.full((k, 2), np.nan, dtype=float)
+        for cid in range(k):
+            P = X2d[cids == cid]
+            if P.shape[0] == 0:
+                continue
+            if P.shape[0] == 1:
+                C[cid] = P[0]
+                continue
+            D = cdist(P, P, metric="euclidean")
+            idx = np.argmin(D.sum(axis=1))
+            C[cid] = P[idx]
+        # fill any nan clusters with plain means (rare: empty cluster)
+        nan_rows = np.isnan(C).any(axis=1)
+        if nan_rows.any():
+            for cid in np.where(nan_rows)[0]:
+                P = X2d[cids == cid]
+                if P.size:
+                    C[cid] = P.mean(axis=0)
+                else:
+                    C[cid] = np.array([np.nan, np.nan], dtype=float)
+        return C
+
+    # Because some users haven't updated the helper signature yet, we adapt at runtime:
+    def _plot_with_centroids_safe(X_vis, y, classes, cids, k, this_fig_dir, prefix, method_name, C2d):
+        try:
+            # New signature (with centroid_override_2d, legend_out, figsize)
+            plot_task3_visualizations(
+                X_vis, y, classes, cids, k,
+                this_fig_dir, prefix, method_name,
+                figsize=(9, 6), legend_out=True,
+                centroid_override_2d=C2d
+            )
+        except TypeError:
+            # Old signature (no centroid_override_2d); fall back to default behavior
+            plot_task3_visualizations(
+                X_vis, y, classes, cids, k,
+                this_fig_dir, prefix, method_name
+            )
+
+    # ---------- common config ----------
     k_values = list(range(2, 8))
     RANDOM_STATE = 42
 
@@ -507,17 +521,21 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
     inertias_v1, silhouettes_v1 = [], []
 
     for k in k_values:
-        km = KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE)
+        km = KMeans(
+            n_clusters=k,
+            init="k-means++",
+            n_init=50,                 # more restarts for stability
+            random_state=RANDOM_STATE
+        )
         cids = km.fit_predict(Xs_v1)
 
-        # Project centroids to the SAME PCA(2) used for X2d_v1
-        centroids_pca2 = pca_vis.transform(km.cluster_centers_)
-        if centroids_pca2.shape[0] != k:
-            centroids_pca2 = centroids_pca2[:k, :]
+        # Robust centroids in the SAME 2D plotting space (medoids)
+        centroids_2d = medoid_centroids_2d(X2d_v1, cids, k)
 
-        plot_task3_visualizations(
-            X2d_v1, y, classes, cids, k, centroids_pca2,
-            v1_fig, "V1 KMeans", "PCA2"
+        # Single clusters+labels plot (your helper should now only generate this one)
+        _plot_with_centroids_safe(
+            X2d_v1, y, classes, cids, k,
+            v1_fig, "V1 KMeans", "PCA2", centroids_2d
         )
 
         inertias_v1.append(km.inertia_)
@@ -561,31 +579,32 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
     inertias_v2, silhouettes_v2 = [], []
 
     for k in k_values:
-        km = KMeans(n_clusters=k, n_init=10, random_state=RANDOM_STATE)
+        km = KMeans(
+            n_clusters=k,
+            init="k-means++",
+            n_init=50,
+            random_state=RANDOM_STATE
+        )
         cids = km.fit_predict(X_pca100)
 
-        # Project centroids into PCA(2) and UMAP(2) spaces
-        centroids_pca2 = pca_2.transform(km.cluster_centers_)
-        if centroids_pca2.shape[0] != k:
-            centroids_pca2 = centroids_pca2[:k, :]
+        # Robust centroids in each 2D space (medoids)
+        centroids_pca2 = medoid_centroids_2d(X2d_pca, cids, k)
+        centroids_umap2 = medoid_centroids_2d(X2d_umap, cids, k)
 
-        centroids_umap2 = umap_2.transform(km.cluster_centers_)
-        if centroids_umap2.shape[0] != k:
-            centroids_umap2 = centroids_umap2[:k, :]
-
-        # Visualize both spaces
-        plot_task3_visualizations(
-            X2d_pca, y, classes, cids, k, centroids_pca2,
-            v2_fig, "V2 KMeans", "PCA2"
+        # PCA2 view
+        _plot_with_centroids_safe(
+            X2d_pca, y, classes, cids, k,
+            v2_fig, "V2 KMeans", "PCA2", centroids_pca2
         )
-        plot_task3_visualizations(
-            X2d_umap, y, classes, cids, k, centroids_umap2,
-            v2_fig, "V2 KMeans", "UMAP2"
+
+        # UMAP2 view
+        _plot_with_centroids_safe(
+            X2d_umap, y, classes, cids, k,
+            v2_fig, "V2 KMeans", "UMAP2", centroids_umap2
         )
 
         inertias_v2.append(km.inertia_)
         silhouettes_v2.append(silhouette_score(X_pca100, cids))
-
 
     plot_metric(k_values, inertias_v2, "Elbow Method (V2)", "Inertia",
                 os.path.join(v2_fig, "elbow.png"))
@@ -593,7 +612,7 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
                 os.path.join(v2_fig, "silhouette.png"))
     pd.DataFrame({"K": k_values, "Inertia": inertias_v2, "Silhouette": silhouettes_v2}).to_csv(
         os.path.join(v2_out, "metrics.csv"), index=False)
-    print(" V2 results (PCA100 + UMAP visualization + centroids) saved successfully.")
+    print("✅ V2 results (PCA100 + UMAP visualizations + robust centroids) saved successfully.")
 
     print("\nTask 3 complete — both versions executed and saved.")
 
@@ -610,15 +629,13 @@ def main():
     plot_class_counts_from_y(y, out_dir, fig_dir, title="Class Counts", file_stem="class_counts")
 
     # --- summaries per model ---
-    # knn_res = task1_knn(X, y, classes, out_dir, fig_dir)
-    # svm_results = task2_svm_drop(X, y, classes, out_dir, fig_dir, poly_degree=POLY_DEGREE)
+    #knn_res = task1_knn(X, y, classes, out_dir, fig_dir)
+    #svm_results = task2_svm_drop(X, y, classes, out_dir, fig_dir, poly_degree=POLY_DEGREE)
 
     # Save one CSV with one row per model (KNN + each SVM)
-    # save_all_summaries(knn_res, svm_results, out_dir)
-
+    #save_all_summaries(knn_res, svm_results, out_dir)
 
     task3_kmeans(X, y, classes, out_dir, fig_dir)
-
 
     print("\n All tasks completed successfully. Outputs saved to:", os.path.abspath(out_dir))
 
