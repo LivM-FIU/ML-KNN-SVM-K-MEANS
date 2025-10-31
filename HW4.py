@@ -334,7 +334,7 @@ def save_per_class_table(model_name: str,
     os.makedirs(out_sub, exist_ok=True)
     out_path = os.path.join(out_sub, f"{model_name}_per_class.csv")
     df.to_csv(out_path)
-    print(f"✅ Per-class metrics saved: {out_path}")
+    print(f" Per-class metrics saved: {out_path}")
 
     # ===============================================================
     # HELPER FUNCTION: Visualization for Task 3
@@ -602,7 +602,7 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
                 os.path.join(v1_fig, "silhouette.png"), color="tab:orange", marker="s")
     pd.DataFrame({"K": k_values, "Inertia": inertias_v1, "Silhouette": silhouettes_v1}).to_csv(
         os.path.join(v1_out, "metrics.csv"), index=False)
-    print("✅ V1 results saved successfully.")
+    print(" V1 results saved successfully.")
 
     # ===============================================================
     # VERSION 2 — Top 5000 variance + PCA(100) + UMAP(2)
@@ -667,7 +667,7 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
             os.path.join(v2_fig, "silhouette.png"), color="tab:red",   marker="s")
     pd.DataFrame({"K": k_values, "Inertia": inertias_v2, "Silhouette": silhouettes_v2}).to_csv(
         os.path.join(v2_out, "metrics.csv"), index=False)
-    print("✅ V2 results (PCA100 + UMAP visualizations + robust centroids) saved successfully.")
+    print(" V2 results (PCA100 + UMAP visualizations + robust centroids) saved successfully.")
 
     print("\nTask 3 complete — both versions executed and saved.")
 
