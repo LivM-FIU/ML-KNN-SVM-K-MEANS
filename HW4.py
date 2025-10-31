@@ -284,6 +284,58 @@ def plot_multiclass_roc_pr(y_true: List[str], scores: np.ndarray, classes: List[
     fig.savefig(os.path.join(fig_dir, f"{base_name}_pr.png"), dpi=150, bbox_inches="tight")
     plt.close(fig)
 
+def _per_class_accuracy(y_true: np.ndarray, y_pred: np.ndarray, classes: List[str]) -> np.ndarray:
+    """
+    One-vs-rest accuracy for each class:
+      accuracy_i = (TP_i + TN_i) / (TP_i + FP_i + TN_i + FN_i)
+    """
+    cm = confusion_matrix(y_true, y_pred, labels=classes)
+    per_acc = []
+    N = cm.sum()
+    for i in range(len(classes)):
+        TP = cm[i, i]
+        FN = cm[i, :].sum() - TP
+        FP = cm[:, i].sum() - TP
+        TN = N - (TP + FP + FN)
+        per_acc.append((TP + TN) / N if N else 0.0)
+    return np.array(per_acc, dtype=float)
+
+def save_per_class_table(model_name: str,
+                         y_true_all: List[str],
+                         y_pred_all: List[str],
+                         classes: List[str],
+                         out_dir: str):
+    """
+    Writes {out_dir}/per_class_metrics/{model_name}_per_class.csv
+    with columns: Accuracy, Precision, Recall, F1, Support (per class).
+    """
+    y_true_arr = np.asarray(y_true_all)
+    y_pred_arr = np.asarray(y_pred_all)
+
+    # per-class Precision/Recall/F1/Support
+    prec, rec, f1, support = precision_recall_fscore_support(
+        y_true_arr, y_pred_arr, labels=classes, average=None, zero_division=0
+    )
+
+    # per-class one-vs-rest Accuracy
+    acc = _per_class_accuracy(y_true_arr, y_pred_arr, classes)
+
+    df = pd.DataFrame({
+        "Class": classes,
+        "Accuracy": acc,
+        "Precision": prec,
+        "Recall": rec,
+        "F1": f1,
+        "Support": support.astype(int)
+    })
+    df = df.set_index("Class")
+
+    out_sub = os.path.join(out_dir, "per_class_metrics")
+    os.makedirs(out_sub, exist_ok=True)
+    out_path = os.path.join(out_sub, f"{model_name}_per_class.csv")
+    df.to_csv(out_path)
+    print(f"✅ Per-class metrics saved: {out_path}")
+
     # ===============================================================
     # HELPER FUNCTION: Visualization for Task 3
     # ===============================================================
@@ -445,9 +497,12 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
     os.makedirs(fig_dir, exist_ok=True)
 
     # ---------- local helpers ----------
-    def plot_metric(k_values, values, title, ylabel, path):
+    def plot_metric(k_values, values, title, ylabel, path, color=None, marker="o"):
         fig, ax = plt.subplots(figsize=(6, 4))
-        ax.plot(k_values, values, marker="o")
+        if color is None:
+            ax.plot(k_values, values, marker=marker)
+        else:
+            ax.plot(k_values, values, marker=marker, color=color)
         ax.set_title(title)
         ax.set_xlabel("K")
         ax.set_ylabel(ylabel)
@@ -541,10 +596,10 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         inertias_v1.append(km.inertia_)
         silhouettes_v1.append(silhouette_score(Xs_v1, cids))
 
-    plot_metric(k_values, inertias_v1, "Elbow Method (V1)", "Inertia",
-                os.path.join(v1_fig, "elbow.png"))
-    plot_metric(k_values, silhouettes_v1, "Silhouette Score (V1)", "Silhouette",
-                os.path.join(v1_fig, "silhouette.png"))
+    plot_metric(k_values, inertias_v1,   "Elbow Method (V1)",      "Inertia",
+                os.path.join(v1_fig, "elbow.png"),      color="tab:blue",  marker="o")
+    plot_metric(k_values, silhouettes_v1,"Silhouette Score (V1)", "Silhouette",
+                os.path.join(v1_fig, "silhouette.png"), color="tab:orange", marker="s")
     pd.DataFrame({"K": k_values, "Inertia": inertias_v1, "Silhouette": silhouettes_v1}).to_csv(
         os.path.join(v1_out, "metrics.csv"), index=False)
     print("✅ V1 results saved successfully.")
@@ -606,10 +661,10 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         inertias_v2.append(km.inertia_)
         silhouettes_v2.append(silhouette_score(X_pca100, cids))
 
-    plot_metric(k_values, inertias_v2, "Elbow Method (V2)", "Inertia",
-                os.path.join(v2_fig, "elbow.png"))
-    plot_metric(k_values, silhouettes_v2, "Silhouette Score (V2)", "Silhouette",
-                os.path.join(v2_fig, "silhouette.png"))
+    plot_metric(k_values, inertias_v2,   "Elbow Method (V2)",      "Inertia",
+            os.path.join(v2_fig, "elbow.png"),      color="tab:green", marker="o")
+    plot_metric(k_values, silhouettes_v2,"Silhouette Score (V2)", "Silhouette",
+            os.path.join(v2_fig, "silhouette.png"), color="tab:red",   marker="s")
     pd.DataFrame({"K": k_values, "Inertia": inertias_v2, "Silhouette": silhouettes_v2}).to_csv(
         os.path.join(v2_out, "metrics.csv"), index=False)
     print("✅ V2 results (PCA100 + UMAP visualizations + robust centroids) saved successfully.")
@@ -626,14 +681,19 @@ def main():
     X, y = load_data(CSV_PATH)
     classes = np.unique(y).tolist()
 
-    plot_class_counts_from_y(y, out_dir, fig_dir, title="Class Counts", file_stem="class_counts")
+    # plot_class_counts_from_y(y, out_dir, fig_dir, title="Class Counts", file_stem="class_counts")
 
-    # --- summaries per model ---
-    #knn_res = task1_knn(X, y, classes, out_dir, fig_dir)
-    #svm_results = task2_svm_drop(X, y, classes, out_dir, fig_dir, poly_degree=POLY_DEGREE)
+    # # --- summaries per model ---
+    # knn_res = task1_knn(X, y, classes, out_dir, fig_dir)
+    # save_per_class_table("KNN", knn_res.y_true_all, knn_res.y_pred_all, classes, out_dir)
 
-    # Save one CSV with one row per model (KNN + each SVM)
-    #save_all_summaries(knn_res, svm_results, out_dir)
+    # svm_results = task2_svm_drop(X, y, classes, out_dir, fig_dir, poly_degree=POLY_DEGREE)
+    # for name, res in svm_results.items():
+    #     # name is like 'SVM_Linear', 'SVM_Poly', 'SVM_RBF'
+    #     save_per_class_table(name, res.y_true_all, res.y_pred_all, classes, out_dir)
+
+    # # Save one CSV with one row per model (KNN + each SVM)
+    # save_all_summaries(knn_res, svm_results, out_dir)
 
     task3_kmeans(X, y, classes, out_dir, fig_dir)
 
