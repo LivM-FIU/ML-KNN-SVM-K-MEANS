@@ -513,7 +513,7 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
     def medoid_centroids_2d(X2d: np.ndarray, cids: np.ndarray, k: int) -> np.ndarray:
         """
         Robust centroids in 2D via cluster medoids (actual points minimizing total intra-cluster distance).
-        Immune to outliers pulling the centroid.
+        Used as a fallback when trimming removes all inliers.
         """
         C = np.full((k, 2), np.nan, dtype=float)
         for cid in range(k):
@@ -526,27 +526,58 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
             D = cdist(P, P, metric="euclidean")
             idx = np.argmin(D.sum(axis=1))
             C[cid] = P[idx]
-        # fill any nan clusters with plain means (rare: empty cluster)
-        nan_rows = np.isnan(C).any(axis=1)
-        if nan_rows.any():
-            for cid in np.where(nan_rows)[0]:
-                P = X2d[cids == cid]
-                if P.size:
-                    C[cid] = P.mean(axis=0)
-                else:
-                    C[cid] = np.array([np.nan, np.nan], dtype=float)
         return C
-    
-    def mean_centroids_2d(X2d: np.ndarray, cids: np.ndarray, k: int) -> np.ndarray:
+
+    def trimmed_mean_centroids_2d(
+        X2d: np.ndarray,
+        cids: np.ndarray,
+        k: int,
+        whisker_factor: float = 1.5,
+    ) -> np.ndarray:
         """
-        Calculate the standard mean (centroid) for each cluster in the 2D space.
+        Compute centroids after removing outliers inside each cluster.
+
+        We mark a point as an outlier when its distance to the cluster median in
+        the visualization space exceeds the Tukey outer fence
+        (q3 + whisker_factor * IQR). If that would prune every point, the fence
+        is relaxed to the 90th percentile, and as an ultimate fallback we use
+        the cluster medoid so that we always return a valid coordinate.
         """
         C = np.full((k, 2), np.nan, dtype=float)
+        fallback = medoid_centroids_2d(X2d, cids, k)
+
         for cid in range(k):
             P = X2d[cids == cid]
-            if P.shape[0] > 0:
-                C[cid] = P.mean(axis=0)
-            # If P.shape[0] == 0 (empty cluster), the centroid remains np.nan
+            if P.shape[0] == 0:
+                continue
+            if P.shape[0] == 1:
+                C[cid] = P[0]
+                continue
+
+            center = np.median(P, axis=0)
+            dists = np.linalg.norm(P - center, axis=1)
+            q1, q3 = np.percentile(dists, [25, 75])
+            iqr = q3 - q1
+            if iqr <= 1e-12:
+                threshold = q3
+            else:
+                threshold = q3 + whisker_factor * iqr
+
+            inlier_mask = dists <= threshold
+            if not inlier_mask.any():
+                relaxed_threshold = np.percentile(dists, 90)
+                inlier_mask = dists <= relaxed_threshold
+
+            if inlier_mask.any():
+                C[cid] = P[inlier_mask].mean(axis=0)
+            else:
+                C[cid] = fallback[cid]
+
+        # Any remaining NaNs (empty clusters) fall back to medoids as well
+        nan_rows = np.isnan(C).any(axis=1)
+        if nan_rows.any():
+            C[nan_rows] = fallback[nan_rows]
+
         return C
 
     # Because some users haven't updated the helper signature yet, we adapt at runtime:
@@ -596,8 +627,8 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         )
         cids = km.fit_predict(Xs_v1)
 
-        # Robust centroids in the SAME 2D plotting space (medoids)
-        centroids_2d = mean_centroids_2d(X2d_v1, cids, k)
+        # Centroids computed from inliers only (exclude outliers before averaging)
+        centroids_2d = trimmed_mean_centroids_2d(X2d_v1, cids, k)
 
         # Single clusters+labels plot (your helper should now only generate this one)
         _plot_with_centroids_safe(
@@ -654,9 +685,9 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         )
         cids = km.fit_predict(X_pca100)
 
-        # Robust centroids in each 2D space (medoids)
-        centroids_pca2 = mean_centroids_2d(X2d_pca, cids, k)
-        centroids_umap2 = mean_centroids_2d(X2d_umap, cids, k)
+        # Centroids computed from inliers only (exclude outliers before averaging)
+        centroids_pca2 = trimmed_mean_centroids_2d(X2d_pca, cids, k)
+        centroids_umap2 = trimmed_mean_centroids_2d(X2d_umap, cids, k)
 
         # PCA2 view
         _plot_with_centroids_safe(
