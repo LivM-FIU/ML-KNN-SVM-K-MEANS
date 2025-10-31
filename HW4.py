@@ -536,6 +536,18 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
                 else:
                     C[cid] = np.array([np.nan, np.nan], dtype=float)
         return C
+    
+    def mean_centroids_2d(X2d: np.ndarray, cids: np.ndarray, k: int) -> np.ndarray:
+        """
+        Calculate the standard mean (centroid) for each cluster in the 2D space.
+        """
+        C = np.full((k, 2), np.nan, dtype=float)
+        for cid in range(k):
+            P = X2d[cids == cid]
+            if P.shape[0] > 0:
+                C[cid] = P.mean(axis=0)
+            # If P.shape[0] == 0 (empty cluster), the centroid remains np.nan
+        return C
 
     # Because some users haven't updated the helper signature yet, we adapt at runtime:
     def _plot_with_centroids_safe(X_vis, y, classes, cids, k, this_fig_dir, prefix, method_name, C2d):
@@ -585,7 +597,7 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         cids = km.fit_predict(Xs_v1)
 
         # Robust centroids in the SAME 2D plotting space (medoids)
-        centroids_2d = medoid_centroids_2d(X2d_v1, cids, k)
+        centroids_2d = mean_centroids_2d(X2d_v1, cids, k)
 
         # Single clusters+labels plot (your helper should now only generate this one)
         _plot_with_centroids_safe(
@@ -643,8 +655,8 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         cids = km.fit_predict(X_pca100)
 
         # Robust centroids in each 2D space (medoids)
-        centroids_pca2 = medoid_centroids_2d(X2d_pca, cids, k)
-        centroids_umap2 = medoid_centroids_2d(X2d_umap, cids, k)
+        centroids_pca2 = mean_centroids_2d(X2d_pca, cids, k)
+        centroids_umap2 = mean_centroids_2d(X2d_umap, cids, k)
 
         # PCA2 view
         _plot_with_centroids_safe(
