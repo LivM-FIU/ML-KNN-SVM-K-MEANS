@@ -532,22 +532,19 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
         X2d: np.ndarray,
         cids: np.ndarray,
         k: int,
-        inlier_fraction: float = 0.85,
+        whisker_factor: float = 1.5,
     ) -> np.ndarray:
         """
-        Compute centroids after removing the farthest points inside each cluster.
+        Compute centroids after removing outliers inside each cluster.
 
-        Instead of relying on an adaptive distance fence (which can still keep
-        very remote outliers when a cluster is small), we explicitly keep only
-        the closest ``inlier_fraction`` portion of members relative to the
-        cluster median in the visualization space. This guarantees that the
-        centroid is anchored to the dense region even when a handful of samples
-        lie far away. A medoid fallback ensures we always emit a valid point.
+        We mark a point as an outlier when its distance to the cluster median in
+        the visualization space exceeds the Tukey outer fence
+        (q3 + whisker_factor * IQR). If that would prune every point, the fence
+        is relaxed to the 90th percentile, and as an ultimate fallback we use
+        the cluster medoid so that we always return a valid coordinate.
         """
         C = np.full((k, 2), np.nan, dtype=float)
         fallback = medoid_centroids_2d(X2d, cids, k)
-
-        inlier_fraction = float(np.clip(inlier_fraction, 0.1, 1.0))
 
         for cid in range(k):
             P = X2d[cids == cid]
@@ -559,18 +556,20 @@ def task3_kmeans(X: pd.DataFrame, y: pd.Series, classes: list, out_dir: str, fig
 
             center = np.median(P, axis=0)
             dists = np.linalg.norm(P - center, axis=1)
+            q1, q3 = np.percentile(dists, [25, 75])
+            iqr = q3 - q1
+            if iqr <= 1e-12:
+                threshold = q3
+            else:
+                threshold = q3 + whisker_factor * iqr
 
-            n_points = P.shape[0]
-            if n_points <= 3:
-                C[cid] = P.mean(axis=0)
-                continue
+            inlier_mask = dists <= threshold
+            if not inlier_mask.any():
+                relaxed_threshold = np.percentile(dists, 90)
+                inlier_mask = dists <= relaxed_threshold
 
-            n_keep = max(1, int(np.ceil(n_points * inlier_fraction)))
-            order = np.argsort(dists)
-            keep_idx = order[:n_keep]
-
-            if keep_idx.size:
-                C[cid] = P[keep_idx].mean(axis=0)
+            if inlier_mask.any():
+                C[cid] = P[inlier_mask].mean(axis=0)
             else:
                 C[cid] = fallback[cid]
 
